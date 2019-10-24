@@ -51,6 +51,7 @@ void be_init_sched(void);
 void be_init_sched_normal(void);
 void be_init_sched_rand(void);
 void be_init_sched_trivial(void);
+void be_init_sched_sparc(void);
 void be_init_spill(void);
 void be_init_spillbelady(void);
 void be_init_spilloptions(void);
@@ -100,6 +101,7 @@ void be_init_modules(void)
 	be_init_sched_normal();
 	be_init_sched_rand();
 	be_init_sched_trivial();
+	be_init_sched_sparc();
 
 	be_init_chordal_main();
 	be_init_pref_alloc();
