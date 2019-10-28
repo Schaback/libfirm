@@ -14,6 +14,7 @@
 #include "debug.h"
 #include "besched.h"
 #include "firm_types.h"
+#include "gen_sparc_new_nodes.h"
 #include "irgwalk.h"
 #include "irouts.h"
 #include "sparc_new_nodes.h"
@@ -29,11 +30,18 @@
 #define SIZE_CHECK false
 
 DEBUG_ONLY(static firm_dbg_module_t *dbg = NULL;)
-ir_node* last_load = NULL;
-ir_node* last_icci = NULL;
-ir_node* last_muldiv = NULL;
+static ir_node* last_load = NULL;
+static ir_node* last_icci = NULL;
+static ir_node* last_muldiv = NULL;
 
-static char check_delay_load(ir_node* node) {
+typedef struct choice {
+	ir_node* node;
+	int score;
+} choice;
+
+static char score_load(ir_node* node) {
+	if (is_sparc_Ld(node))
+		return 1;
 	if (last_load == NULL)
 		return 0;
 	foreach_irn_in(node, i, pred) {
@@ -43,7 +51,7 @@ static char check_delay_load(ir_node* node) {
 			DB((dbg, LEVEL_1, GRN "\tLoad dependency found at %ld\n" RST, 
 							node->node_nr));
 			DB((dbg, LEVEL_1, GRN "\t...without Proj\n" RST));
-			return 1;
+			return -1;
 		}
 		if (!is_Proj(pred))
 			continue;
@@ -51,21 +59,29 @@ static char check_delay_load(ir_node* node) {
 			if (pred2 == last_load) {
 				DB((dbg, LEVEL_1, GRN "\tLoad dependency found at %ld\n" RST, 
 							node->node_nr));
-				return 1;
+				return -1;
 			}
 		}
 	}
 	return 0;
 }
 
-static bool check_branch(ir_node* node) {
+static bool score_branch(ir_node* node) {
 	if (node == last_icci)	
 		DB((dbg, LEVEL_1, BLU "\tBranch predecessor found: %ld\n" RST, 
 				node->node_nr));
 	return (node == last_icci) ? 1 : 0;
 }
 
-static char check_delay_muldiv(ir_node* node) {
+inline static bool _is_MulDiv(const ir_node* node) {
+	return is_sparc_SMul(node)  || is_sparc_SMulCCZero(node) 
+		|| is_sparc_SMulh(node) || is_sparc_UMulh(node) 
+		|| is_sparc_SDiv(node)  || is_sparc_UDiv(node);
+}
+
+static char score_muldiv(ir_node* node) {
+	if (_is_MulDiv(node))
+		return 1;
 	if (last_muldiv == NULL)
 		return 0;
 	DB((dbg, LEVEL_1, BLU "\tChecking Mul/Div\n" RST)); 
@@ -75,16 +91,10 @@ static char check_delay_muldiv(ir_node* node) {
 				continue; // Only check adress calc. registers
 			DB((dbg, LEVEL_1, YEL "\tMul/Div dependency found at %ld\n" RST, 
 							node->node_nr));
-			return 1;
+			return -1;
 		}
 	}
 	return 0;
-}
-
-inline static bool _is_MulDiv(const ir_node* node) {
-	return is_sparc_SMul(node)  || is_sparc_SMulCCZero(node) 
-		|| is_sparc_SMulh(node) || is_sparc_UMulh(node) 
-		|| is_sparc_SDiv(node)  || is_sparc_UDiv(node);
 }
 
 #define DUMP_NODES(x) \
@@ -96,24 +106,37 @@ inline static bool _is_MulDiv(const ir_node* node) {
 static ir_node *sparc_select(ir_nodeset_t *ready_set)
 {
 	int n = ir_nodeset_size(ready_set);
-	DB((dbg, LEVEL_1, "\tready_set contains %i node(s)\n", n));
+	DB((dbg, LEVEL_1, "\tready_set contains %i node(s): ", n));
 	DUMP_NODES(ready_set);
+
+	choice best_choice;
+	best_choice.node  = ir_nodeset_first(ready_set);
+	best_choice.score = -100;
+
 	if (SIZE_CHECK && n == 1) { 
 		// Branches are the only option most of the time (always?)
 		// No schedueling betweeen blocks...
 		DB((dbg, LEVEL_1, "\tOnly one node found\n"));
 	} else {
 		foreach_ir_nodeset(ready_set, irn, iter) {
-			check_delay_load(irn);
-			check_branch(irn);
-			check_delay_muldiv(irn);
+			int current_score = 0;
+			current_score += score_load(irn);
+			current_score += score_branch(irn);
+			current_score += score_muldiv(irn);
+			DB((dbg, LEVEL_1, "\tnode %ld scored %i ", irn->node_nr, current_score));
+			if (current_score > best_choice.score) {
+				DB((dbg, LEVEL_1, "(current best)\n"));
+				best_choice.node = irn;
+				best_choice.score = current_score;
+			} else {
+				DB((dbg, LEVEL_1, "\n"));
+			}
 		}
 	}
-	ir_node* node = ir_nodeset_first(ready_set);
-	last_load     = is_sparc_Ld(node) ? node : NULL;
-	last_muldiv   = _is_MulDiv(node)  ? node : NULL;
-	DB((dbg, LEVEL_1, "\tselected node %ld\n", node->node_nr));
-	return node;
+	last_load     = is_sparc_Ld(best_choice.node) ? best_choice.node : NULL;
+	last_muldiv   = _is_MulDiv( best_choice.node) ? best_choice.node : NULL;
+	DB((dbg, LEVEL_1, "\tselected node %ld\n", best_choice.node->node_nr));
+	return best_choice.node;
 }
 
 static void sched_block(ir_node *block, void *data)
@@ -160,3 +183,4 @@ void be_init_sched_sparc(void)
 	FIRM_DBG_REGISTER(dbg, "firm.be.sched.sparc");
 }
 
+// get_Proj_pred(x)
