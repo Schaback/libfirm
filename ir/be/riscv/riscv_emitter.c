@@ -188,6 +188,9 @@ static void emit_be_Copy(ir_node const *const node)
 static void emit_be_IncSP(ir_node const *const node)
 {
 	int const offs = -be_get_IncSP_offset(node);
+	if (offs == 0) {
+		return;
+	}
 	assert(is_simm12(offs));
 	riscv_emitf(node, "addi\t%D0, %S0, %d", offs);
 }
@@ -204,6 +207,55 @@ static void emit_be_Perm(ir_node const *const node)
 	} else {
 		panic("unexpected register class");
 	}
+}
+
+static void emit_be_MemPerm(ir_node const *const node)
+{
+	/* TODO: this implementation is slower than necessary. */
+
+	bool const omit_fp      = riscv_get_irg_data(get_irn_irg(node))->omit_fp;
+	int const memperm_arity = be_get_MemPerm_entity_arity(node);
+	int const max_arity     = 23;
+	if (memperm_arity > max_arity)
+		panic("memperm with more than %d inputs not supported yet", max_arity);
+
+	char const *const frame_base = omit_fp ? "sp" : "fp";
+
+	int const memperm_offset = be_get_MemPerm_offset(node);
+	int ent_offset = memperm_offset;
+
+	riscv_emitf(node, "addi\tsp, sp, -%d", memperm_arity * RISCV_REGISTER_SIZE);
+	for (int i = 0; i < memperm_arity; ++i) {
+		/* spill register */
+		arch_register_t const *const reg = arch_register_for_index(&riscv_reg_classes[CLASS_riscv_gp], i + 9);
+
+		riscv_emitf(node, "sw\t%s, %d(sp)", reg->name, i * RISCV_REGISTER_SIZE);
+
+		/* load from entity */
+		ir_entity *entity = be_get_MemPerm_in_entity(node, i);
+		int        offset = get_entity_offset(entity) + ent_offset;
+		if (omit_fp) {
+			offset += (memperm_arity * RISCV_REGISTER_SIZE);
+		}
+		riscv_emitf(node, "lw\t%s, %d(%s)", reg->name, offset, frame_base);
+		ent_offset += 4;
+	}
+
+	for (int i = memperm_arity; i-- > 0; ) {
+		/* store to new entity */
+		ent_offset -= 4;
+		ir_entity *entity = be_get_MemPerm_out_entity(node, i);
+		int        offset = get_entity_offset(entity) + ent_offset;
+		if (omit_fp) {
+			offset += (memperm_arity * RISCV_REGISTER_SIZE);
+		}
+		arch_register_t const *const reg = arch_register_for_index(&riscv_reg_classes[CLASS_riscv_gp], i + 9);
+		riscv_emitf(node, "sw\t%s, %d(%s)", reg->name, offset, frame_base);
+		/* restore register */
+		riscv_emitf(node, "lw\t%s, %d(sp)", reg->name, i * RISCV_REGISTER_SIZE);
+	}
+	riscv_emitf(node, "addi\tsp, sp, %d", memperm_arity * RISCV_REGISTER_SIZE);
+	assert(ent_offset == memperm_offset);
 }
 
 static void emit_riscv_bcc(ir_node const *const node)
@@ -247,6 +299,21 @@ static void emit_riscv_FrameAddr(const ir_node *node)
 	riscv_emitf(node, "addi\t%D0, %S0, %d", (int)offset);
 }
 
+static void emit_riscv_SubSP(ir_node const *const node)
+{
+	riscv_emitf(node, "sub\t%D0, %S1, %S2");
+	riscv_emitf(node, "mv\t%D1, %S1");
+}
+
+static void emit_riscv_SubSPimm(ir_node const *const node)
+{
+	const riscv_immediate_attr_t *attr   = get_riscv_immediate_attr_const(node);
+	int32_t val = attr->val;
+	assert(is_simm12((long)val));
+	riscv_emitf(node, "addi\t%D0, %S1, %d", (int)val);
+	riscv_emitf(node, "mv\t%D1, %S1");
+}
+
 static void riscv_register_emitters(void)
 {
 	be_init_emitters();
@@ -256,9 +323,12 @@ static void riscv_register_emitters(void)
 	be_set_emitter(op_be_Copy,         emit_be_Copy);
 	be_set_emitter(op_be_IncSP,        emit_be_IncSP);
 	be_set_emitter(op_be_Perm,         emit_be_Perm);
+	be_set_emitter(op_be_MemPerm,      emit_be_MemPerm);
 	be_set_emitter(op_riscv_FrameAddr, emit_riscv_FrameAddr);
 	be_set_emitter(op_riscv_bcc,       emit_riscv_bcc);
 	be_set_emitter(op_riscv_j,         emit_riscv_j);
+	be_set_emitter(op_riscv_SubSP,     emit_riscv_SubSP);
+	be_set_emitter(op_riscv_SubSPimm,  emit_riscv_SubSPimm);
 	be_set_emitter(op_riscv_switch,    emit_riscv_switch);
 }
 

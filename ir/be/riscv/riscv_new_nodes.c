@@ -5,8 +5,6 @@
 
 #include "riscv_new_nodes_t.h"
 
-#include <inttypes.h>
-
 #include "gen_riscv_new_nodes.h"
 #include "riscv_nodes_attr.h"
 
@@ -62,7 +60,10 @@ static void dump_immediate(FILE *const F, char const *const prefix, ir_node cons
 		fputc(' ', F);
 		if (prefix)
 			fprintf(F, "%s(", prefix);
-		fputs(get_entity_name(imm->ent), F);
+		const char *name = get_entity_name(imm->ent);
+		if (name) {
+			fputs(name, F);
+		}
 		if (imm->val != 0)
 			fprintf(F, "%+" PRId32, imm->val);
 		if (prefix)
@@ -143,6 +144,8 @@ void riscv_dump_node(FILE *const F, ir_node const *const n, dump_reason_t const 
 			case iro_riscv_sra:
 			case iro_riscv_srl:
 			case iro_riscv_sub:
+			case iro_riscv_SubSP:
+			case iro_riscv_SubSPimm:
 			case iro_riscv_switch:
 			case iro_riscv_xor:
 				break;

@@ -26,7 +26,7 @@ static const unsigned ignore_regs[] = {
 };
 
 static unsigned const callee_saves[] = {
-	REG_S0,
+	REG_FP,
 	REG_S1,
 	REG_S2,
 	REG_S3,
@@ -61,6 +61,11 @@ static unsigned const caller_saves[] = {
 static ir_node *get_Start_sp(ir_graph *const irg)
 {
 	return be_get_Start_proj(irg, &riscv_registers[REG_SP]);
+}
+
+static ir_node *get_Start_fp(ir_graph *const irg)
+{
+	return be_get_Start_proj(irg, &riscv_registers[REG_FP]);
 }
 
 ir_node *get_Start_zero(ir_graph *const irg)
@@ -132,8 +137,12 @@ static ir_node *make_extension(dbg_info *const dbgi, ir_node *const op, unsigned
 		return sra;
 	} else if (op_size == 8) {
 		return new_bd_riscv_andi(dbgi, block, new_op, NULL, (1U << op_size) - 1);
+	} else {
+		int32_t  const val = RISCV_MACHINE_SIZE - op_size;
+		ir_node *const sll = new_bd_riscv_slli(dbgi, block, new_op, NULL, val);
+		ir_node *const srl = new_bd_riscv_srli(dbgi, block, sll,    NULL, val);
+		return srl;
 	}
-	TODO(op);
 }
 
 static ir_node *extend_value(ir_node *const val)
@@ -292,6 +301,46 @@ static ir_node *gen_Address(ir_node *const node)
 	return make_address(node, ent, 0);
 }
 
+static ir_node *gen_Alloc(ir_node *node)
+{
+	dbg_info *dbgi       = get_irn_dbg_info(node);
+	ir_node  *new_block  = be_transform_nodes_block(node);
+	ir_node  *size       = get_Alloc_size(node);
+	ir_graph *irg        = get_irn_irg(node);
+	ir_node  *stack_pred = be_get_Start_proj(irg, &riscv_registers[REG_SP]);
+	ir_node  *mem        = get_Alloc_mem(node);
+	ir_node  *new_mem    = be_transform_node(mem);
+
+	ir_node *subsp;
+	if (is_Const(size)) {
+		long const sizel = get_Const_long(size);
+		assert((sizel & ((1<<RISCV_PO2_STACK_ALIGNMENT) - 1)) == 0 && "Found Alloc with misaligned constant");
+		assert(is_simm12(sizel));
+		subsp = new_bd_riscv_SubSPimm(dbgi, new_block, new_mem, stack_pred, NULL, -sizel);
+	} else {
+		ir_node *new_size = be_transform_node(size);
+		subsp = new_bd_riscv_SubSP(dbgi, new_block, new_mem, stack_pred, new_size);
+	}
+
+	ir_node *const stack_proj = be_new_Proj_reg(subsp, pn_riscv_SubSP_stack, &riscv_registers[REG_SP]);
+	be_stack_record_chain(&stack_env, subsp, n_riscv_SubSP_stack, stack_proj);
+
+	return subsp;
+}
+
+static ir_node *gen_Proj_Alloc(ir_node *node)
+{
+	ir_node *alloc     = get_Proj_pred(node);
+	ir_node *new_alloc = be_transform_node(alloc);
+	unsigned pn        = get_Proj_num(node);
+
+	switch ((pn_Alloc)pn) {
+		case pn_Alloc_M:   return be_new_Proj(new_alloc, pn_riscv_SubSP_M);
+		case pn_Alloc_res: return be_new_Proj(new_alloc, pn_riscv_SubSP_addr);
+	}
+	panic("invalid Proj->Alloc");
+}
+
 typedef ir_node *cons_binop(dbg_info*, ir_node*, ir_node*, ir_node*);
 typedef ir_node *cons_binop_imm(dbg_info*, ir_node*, ir_node*, ir_entity*, int32_t);
 
@@ -381,7 +430,7 @@ static ir_node *gen_Call(ir_node *const node)
 	record_returns_twice(irg, fun_type);
 
 	riscv_calling_convention_t cconv;
-	riscv_determine_calling_convention(&cconv, fun_type);
+	riscv_determine_calling_convention(&cconv, fun_type, NULL);
 
 	ir_node *mems[1 + cconv.n_mem_param];
 	unsigned m = 0;
@@ -861,7 +910,7 @@ static ir_node *gen_Proj_Proj_Call(ir_node *const node)
 	ir_type *const fun_type = get_Call_type(ocall);
 
 	riscv_calling_convention_t cconv;
-	riscv_determine_calling_convention(&cconv, fun_type);
+	riscv_determine_calling_convention(&cconv, fun_type, NULL);
 
 	ir_node               *const call = be_transform_node(ocall);
 	unsigned               const num  = get_Proj_num(node);
@@ -886,8 +935,9 @@ static ir_node *gen_Proj_Proj_Start(ir_node *const node)
 		dbg_info *const dbgi  = get_irn_dbg_info(node);
 		ir_node  *const block = be_transform_nodes_block(node);
 		ir_node  *const mem   = be_get_Start_mem(irg);
-		ir_node  *const base  = get_Start_sp(irg);
+		ir_node  *const base  = cur_cconv.omit_fp ? get_Start_sp(irg) : get_Start_fp(irg);
 		ir_node  *const load  = new_bd_riscv_lw(dbgi, block, mem, base, param->entity, 0);
+		arch_add_irn_flags(load, (arch_irn_flags_t)riscv_arch_irn_flag_ignore_fp_offset_fix);
 		return be_new_Proj(load, pn_riscv_lw_res);
 	}
 }
@@ -908,7 +958,7 @@ static ir_node *gen_Proj_Start(ir_node *const node)
 	ir_graph *const irg = get_irn_irg(node);
 	switch ((pn_Start)get_Proj_num(node)) {
 	case pn_Start_M:            return be_get_Start_mem(irg);
-	case pn_Start_P_frame_base: return get_Start_sp(irg);
+	case pn_Start_P_frame_base: return cur_cconv.omit_fp ? get_Start_sp(irg): get_Start_fp(irg);
 	case pn_Start_T_args:       return new_r_Bad(irg, mode_T);
 	}
 	panic("unexpected Proj");
@@ -971,17 +1021,47 @@ static ir_node *gen_Return(ir_node *const node)
 	return ret;
 }
 
-static ir_node *gen_shift_op(ir_node *const node, cons_binop *const cons, cons_binop_imm *const cons_imm)
+static ir_node *gen_shift_op(ir_node *const node, cons_binop *const cons, cons_binop_imm *const cons_imm, bool needs_extension)
 {
 	dbg_info *const dbgi  = get_irn_dbg_info(node);
 	ir_node  *const block = be_transform_nodes_block(node);
 	ir_node  *const l     = get_binop_left(node);
-	ir_node  *const new_l = be_transform_node(l);
+	ir_node  *new_l       = be_transform_node(l);
 	ir_node  *const r     = get_binop_right(node);
+	ir_mode *const mode   = get_irn_mode(node);
+	unsigned const size   = get_mode_size_bits(mode);
+
+	needs_extension = needs_extension && (size != RISCV_MACHINE_SIZE);
+	int extend = RISCV_MACHINE_SIZE - size;
+	/* right shift operations with mode sizes < 32 Bit require correct sign/zero extension.
+	 * This is done by first shifting the operand to the left by 32-size bits and then shifting back to the
+	 * right (arithmetic/logical) by the same amount. Finally the actual shift operation is performed.
+	 * If the shift amount is known (r is const), the two right shift operations are combined (if possible).
+	 */
+	if (needs_extension) {
+		assert(is_uimm5(extend));
+		if (!mode_is_signed(mode) && size == 8) {
+			new_l = new_bd_riscv_andi(dbgi, block, new_l, NULL, (1U << size) - 1);
+			needs_extension = false;
+		} else {
+			new_l = new_bd_riscv_slli(dbgi, block, new_l, NULL, extend);
+		}
+	}
 	if (is_Const(r)) {
-		long const val = get_Const_long(r);
-		if (is_uimm5(val))
+		long val = get_Const_long(r);
+		if (needs_extension && is_uimm5(extend + val)) {
+			val = extend + val;
+			needs_extension = false;
+		}
+		if (is_uimm5(val)) {
+			if (needs_extension) {
+				new_l = cons_imm(dbgi, block, new_l, NULL, extend);
+			}
 			return cons_imm(dbgi, block, new_l, NULL, val);
+		}
+	}
+	if (needs_extension) {
+		new_l = cons_imm(dbgi, block, new_l, NULL, extend);
 	}
 	ir_node *const new_r = be_transform_node(r);
 	return cons(dbgi, block, new_l, new_r);
@@ -989,25 +1069,17 @@ static ir_node *gen_shift_op(ir_node *const node, cons_binop *const cons, cons_b
 
 static ir_node *gen_Shl(ir_node *const node)
 {
-	return gen_shift_op(node, &new_bd_riscv_sll, &new_bd_riscv_slli);
+	return gen_shift_op(node, &new_bd_riscv_sll, &new_bd_riscv_slli, false);
 }
 
 static ir_node *gen_Shr(ir_node *const node)
 {
-	ir_mode *const mode = get_irn_mode(node);
-	unsigned const size = get_mode_size_bits(mode);
-	if (size == RISCV_MACHINE_SIZE)
-		return gen_shift_op(node, &new_bd_riscv_srl, &new_bd_riscv_srli);
-	TODO(node);
+	return gen_shift_op(node, &new_bd_riscv_srl, &new_bd_riscv_srli, true);
 }
 
 static ir_node *gen_Shrs(ir_node *const node)
 {
-	ir_mode *const mode = get_irn_mode(node);
-	unsigned const size = get_mode_size_bits(mode);
-	if (size == RISCV_MACHINE_SIZE)
-		return gen_shift_op(node, &new_bd_riscv_sra, &new_bd_riscv_srai);
-	TODO(node);
+	return gen_shift_op(node, &new_bd_riscv_sra, &new_bd_riscv_srai, true);
 }
 
 static ir_node *gen_Start(ir_node *const node)
@@ -1029,6 +1101,8 @@ static ir_node *gen_Start(ir_node *const node)
 		if (reg)
 			outs[reg->global_index] = BE_START_REG;
 	}
+	if (!cur_cconv.omit_fp)
+		outs[REG_FP] = BE_START_IGNORE;
 
 	return be_new_Start(irg, outs);
 }
@@ -1117,6 +1191,7 @@ static void riscv_register_transformers(void)
 	be_set_transform_function(op_ASM,     gen_ASM);
 	be_set_transform_function(op_Add,     gen_Add);
 	be_set_transform_function(op_Address, gen_Address);
+	be_set_transform_function(op_Alloc,   gen_Alloc);
 	be_set_transform_function(op_And,     gen_And);
 	be_set_transform_function(op_Builtin, gen_Builtin);
 	be_set_transform_function(op_Call,    gen_Call);
@@ -1148,6 +1223,7 @@ static void riscv_register_transformers(void)
 	be_set_transform_function(op_Switch,  gen_Switch);
 	be_set_transform_function(op_Unknown, gen_Unknown);
 
+	be_set_transform_proj_function(op_Alloc,   gen_Proj_Alloc);
 	be_set_transform_proj_function(op_Builtin, gen_Proj_Builtin);
 	be_set_transform_proj_function(op_Call,    gen_Proj_Call);
 	be_set_transform_proj_function(op_Div,     gen_Proj_Div);
@@ -1183,7 +1259,7 @@ void riscv_transform_graph(ir_graph *const irg)
 
 	ir_entity *const fun_ent  = get_irg_entity(irg);
 	ir_type   *const fun_type = get_entity_type(fun_ent);
-	riscv_determine_calling_convention(&cur_cconv, fun_type);
+	riscv_determine_calling_convention(&cur_cconv, fun_type, irg);
 	riscv_layout_parameter_entities(&cur_cconv, irg);
 	be_add_parameter_entity_stores(irg);
 	be_transform_graph(irg, NULL);

@@ -120,8 +120,6 @@
  * It is set to "op_pin_state_floats" if global cse was performed
  * (and during construction: did actually change something).
  * Code placement is necessary.
- *
- * @see new_pseudo_ir_graph()
  */
 FIRM_API ir_graph *new_ir_graph(ir_entity *ent, int n_loc);
 
@@ -426,22 +424,21 @@ typedef enum ir_graph_properties_t {
 } ir_graph_properties_t;
 ENUM_BITSET(ir_graph_properties_t)
 
-/** sets some state properties on the graph */
+/**
+ * Sets the graph properties in @p props on @p irg.
+ * Just sets the flags, use assure_irg_properties() to also perform the analyses required.
+ */
 FIRM_API void add_irg_properties(ir_graph *irg, ir_graph_properties_t props);
-/** clears some graph properties */
+/**
+ * Clears the graph properties in @p props on @p irg.
+ * Just sets the flags, use confirm_irg_properties() with inverted @p props to also invalidate the analysis state.
+ */
 FIRM_API void clear_irg_properties(ir_graph *irg, ir_graph_properties_t props);
-/** queries whether @p irg has the @p props properties set */
+/**
+ * queries whether @p irg has all properties in  @p props set.
+ */
 FIRM_API int irg_has_properties(const ir_graph *irg,
                                 ir_graph_properties_t props);
-
-/** Sets a description for local value n. */
-FIRM_API void set_irg_loc_description(ir_graph *irg, int n, void *description);
-
-/** Returns the description for local value n. */
-FIRM_API void *get_irg_loc_description(ir_graph *irg, int n);
-
-/** Returns the last irn index for this graph. */
-FIRM_API unsigned get_irg_last_idx(const ir_graph *irg);
 
 /**
  * Ensures that a graph fulfills all properties stated in @p state.
@@ -455,6 +452,15 @@ FIRM_API void assure_irg_properties(ir_graph *irg, ir_graph_properties_t props);
  * This should be called after a transformation phase.
  */
 FIRM_API void confirm_irg_properties(ir_graph *irg, ir_graph_properties_t props);
+
+/** Sets a description for local value n. */
+FIRM_API void set_irg_loc_description(ir_graph *irg, int n, void *description);
+
+/** Returns the description for local value n. */
+FIRM_API void *get_irg_loc_description(ir_graph *irg, int n);
+
+/** Returns the last irn index for this graph. */
+FIRM_API unsigned get_irg_last_idx(const ir_graph *irg);
 
 /** @} */
 
