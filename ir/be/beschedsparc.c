@@ -17,6 +17,7 @@
 #include "besched.h"
 #include "firm_types.h"
 #include "gen_sparc_regalloc_if.h"
+#include "irdom.h"
 #include "irgwalk.h"
 #include "irnode.h"
 #include "irnode_t.h"
@@ -33,18 +34,23 @@
 #define CYN "\x1B[36m"
 #define RST "\033[0m"
 
-#define SIZE_CHECK false
+#define SIZE_CHECK true
 
 DEBUG_ONLY(static firm_dbg_module_t *dbg = NULL;)
 static ir_node* last_load = NULL;
-static ir_node* last_icci = NULL;
 static ir_node* last_muldiv = NULL;
-static ir_node* idep_nodes[3];
 
 typedef struct choice {
 	ir_node* node;
 	int score;
 } choice;
+
+typedef struct block_meta {
+	ir_nodeset_t branch_candidates;
+	ir_node* last_conditional;
+	int sched_nodes;
+	int total_nodes;
+} block_meta;
 
 static char score_load(ir_node* node) {
 	if (is_sparc_Ld(node))
@@ -72,14 +78,14 @@ static char score_load(ir_node* node) {
 	}
 	return 0;
 }
-
+/*
 static bool score_branch(ir_node* node) {
 	if (node == last_icci)	
 		DB((dbg, LEVEL_1, BLU "\tBranch predecessor found: %ld\n" RST, 
 				node->node_nr));
 	return (node == last_icci) ? 1 : 0;
 }
-
+*/
 inline static bool _is_MulDiv(const ir_node* node) {
 	return is_sparc_SMul(node)  || is_sparc_SMulCCZero(node) 
 		|| is_sparc_SMulh(node) || is_sparc_UMulh(node) 
@@ -122,7 +128,7 @@ static char score_icc(ir_node* node) {
 		DB((dbg, LEVEL_1, "%lu,", __irn->node_nr)); \
 	DB((dbg, LEVEL_1, "]\n"));
 
-static ir_node *sparc_select(ir_nodeset_t *ready_set)
+static ir_node *sparc_select(ir_nodeset_t *ready_set, block_meta* meta)
 {
 	int n = ir_nodeset_size(ready_set);
 	DB((dbg, LEVEL_1, "\tready_set contains %i node(s): ", n));
@@ -137,11 +143,28 @@ static ir_node *sparc_select(ir_nodeset_t *ready_set)
 		// No schedueling betweeen blocks...
 		DB((dbg, LEVEL_1, "\tOnly one node found\n"));
 	} else {
+		int num_nodes = ir_nodeset_size(&meta->branch_candidates) + 2;
+		if (meta->last_conditional != NULL 
+				&& ir_nodeset_contains(ready_set, meta->last_conditional) 
+				&& meta->total_nodes - meta->sched_nodes <= num_nodes) {
+			if (meta->total_nodes - meta->sched_nodes == num_nodes) {
+				assert(ir_nodeset_contains(ready_set, meta->last_conditional));
+				return meta->last_conditional;
+			} else {
+				ir_node* node = ir_nodeset_first(&meta->branch_candidates);
+				ir_nodeset_remove(&meta->branch_candidates, node);
+				assert(ir_nodeset_contains(ready_set, node));
+				return node;
+			}
+		}
 		foreach_ir_nodeset(ready_set, irn, iter) {
+			if (ir_nodeset_contains(&meta->branch_candidates, irn))
+				continue;
+			if (meta->last_conditional == irn)
+				continue;
 			int current_score = 0;
 			current_score += score_load(irn);
 			current_score += score_icc(irn);
-			current_score += score_branch(irn);
 			current_score += score_muldiv(irn);
 			DB((dbg, LEVEL_1, "\tnode %ld scored %i ", irn->node_nr, current_score));
 			if (current_score > best_choice.score) {
@@ -180,7 +203,7 @@ static void dfs_from(ir_node* irn) {
 static inline bool is_end_node_for_block(ir_node* node) {
 	ir_node* block = get_nodes_block(node);
 	foreach_irn_out(node, i, succ) {
-		if (get_nodes_block(succ) == block)
+		if (!arch_is_irn_not_scheduled(succ) && get_nodes_block(succ) == block)
 			return false; // Has dependants in current block
 	}
 	return true;
@@ -199,6 +222,12 @@ static inline bool modifies_flags(ir_node* node) {
 static void sched_block(ir_node *block, void *data)
 {
 	(void)data;
+	block_meta meta; 
+	meta.last_conditional = NULL;
+	meta.total_nodes = 0;
+	meta.sched_nodes = 0;
+	ir_nodeset_init_size(&meta.branch_candidates, 3);
+
 	DB((dbg, LEVEL_1, "Scheduling new block: %lu\n", block->node_nr));
 	ir_nodeset_t *cands = be_list_sched_begin_block(block);
 	if (get_Block_n_cfg_outs(block) >= 2) {
@@ -208,66 +237,57 @@ static void sched_block(ir_node *block, void *data)
 		//DB((dbg, LEVEL_2, YEL "conditional branch found: %lu\n" RST, 
 		//			branch->node_nr));
 		assert(get_irn_arity(branch) == 1); // why should there be multiple?
-		last_icci = get_irn_in(branch)[0];	
+		meta.last_conditional = get_irn_in(branch)[0];	
 
 		ir_graph* irg = get_irn_irg(block);
 		ir_reserve_resources(irg, IR_RESOURCE_IRN_VISITED);
 		inc_irg_visited(irg);
-		dfs_from(last_icci);
+		dfs_from(branch);
 		ir_free_resources(irg, IR_RESOURCE_IRN_VISITED);
 
-		DB((dbg, LEVEL_1, "Branch predecessor is: %lu\n", last_icci->node_nr));
-		assert(is_sparc_Cmp(last_icci));
+		DB((dbg, LEVEL_1, "Branch predecessor is: %lu\n", meta.last_conditional->node_nr));
 	
-		long nodes_in_block = 0;
-		ir_nodeset_t candidates;
-		ir_nodeset_init(&candidates);
+		meta.total_nodes = 0;
 		foreach_irn_out(block, i, succ) {
-			if (!arch_is_irn_not_scheduled(succ)) {
+			if (!arch_is_irn_not_scheduled(succ) && !arch_irn_is(succ, schedule_first)) {
 				// Scheduelable node
-				nodes_in_block++;
+				meta.total_nodes++;
+				if (ir_nodeset_size(&meta.branch_candidates) >= 3)
+					continue;
 				if (!irn_visited(succ) 
 						&& is_end_node_for_block(succ)
 						&& !modifies_flags(succ)) {
 					// Placeable between cmp and branch
-					ir_nodeset_insert(&candidates, succ);
+					ir_nodeset_insert(&meta.branch_candidates, succ);
 				}
 			}
 		}
+		DB((dbg, LEVEL_1, "Branch cands contains %i node(s): ", ir_nodeset_size(&meta.branch_candidates)));
+		DUMP_NODES(&meta.branch_candidates);
 
-		ir_nodeset_destroy(&candidates);
 	} else {
-		last_icci = NULL;
+		meta.last_conditional = NULL;
 	}
 	while (ir_nodeset_size(cands) > 0) {
-		ir_node *node = sparc_select(cands);
+		ir_node *node = sparc_select(cands, &meta);
 		be_list_sched_schedule(node);
+		meta.sched_nodes++;
 	}
 	be_list_sched_end_block();
+	ir_nodeset_destroy(&meta.branch_candidates);
 }
-/*
-bool start_logging = false;
-static void test_walker(ir_node* node, void* env) {
-	(void) env;
-	if (node->node_nr == 390 || node->node_nr == 1327 || node->node_nr == 1512
-			|| node->node_nr == 1612 || node->node_nr == 1604 
-			|| node->node_nr == 1605)
-		start_logging = true;
-	if (start_logging) {
-		DB((dbg, LEVEL_5, "Walking node %lu\n", node->node_nr));
-	}
-}
-*/
+
 static void sched_sparc(ir_graph *irg)
 {
-	DB((dbg, LEVEL_1, "Starting SPARC schedueling\n"));
+	DB((dbg, LEVEL_1, "Starting SPARC scheduling\n"));
+	DB((dbg, LEVEL_1, "Scheduling graph \"%s\"\n", irg->ent->name));
 	//TODO: is this right? do I need to free_irg_outs?
 	assure_irg_outs(irg);
-	//irg_walk_blkwise_graph(irg, test_walker, NULL, NULL);p
 	
 	be_list_sched_begin(irg);
 	irg_block_walk_graph(irg, sched_block, NULL, NULL);
 	be_list_sched_finish();
+
 	DB((dbg, LEVEL_1, "Done SPARC schedueling\n"));
 }
 
@@ -277,5 +297,3 @@ void be_init_sched_sparc(void)
 	be_register_scheduler("sparc", sched_sparc);
 	FIRM_DBG_REGISTER(dbg, "firm.be.sched.sparc");
 }
-
-// get_Proj_pred(x)
