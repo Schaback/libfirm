@@ -233,37 +233,42 @@ static void sched_block(ir_node *block, void *data)
 	if (get_Block_n_cfg_outs(block) >= 2) {
 		ir_node* successor_block = get_Block_cfg_out(block, 0);
 		ir_node* branch = get_irn_in(get_irn_in(successor_block)[0])[0];
-		assert(is_sparc_Bicc(branch));
-		//DB((dbg, LEVEL_2, YEL "conditional branch found: %lu\n" RST, 
-		//			branch->node_nr));
-		assert(get_irn_arity(branch) == 1); // why should there be multiple?
-		meta.last_conditional = get_irn_in(branch)[0];	
+		if (is_sparc_Bicc(branch)) {
+			//DB((dbg, LEVEL_2, YEL "conditional branch found: %lu\n" RST, 
+			//			branch->node_nr));
+			assert(get_irn_arity(branch) == 1); // why should there be multiple?
+			meta.last_conditional = get_irn_in(branch)[0];	
 
-		ir_graph* irg = get_irn_irg(block);
-		ir_reserve_resources(irg, IR_RESOURCE_IRN_VISITED);
-		inc_irg_visited(irg);
-		dfs_from(branch);
-		ir_free_resources(irg, IR_RESOURCE_IRN_VISITED);
+			ir_graph* irg = get_irn_irg(block);
+			ir_reserve_resources(irg, IR_RESOURCE_IRN_VISITED);
+			inc_irg_visited(irg);
+			dfs_from(branch);
+			ir_free_resources(irg, IR_RESOURCE_IRN_VISITED);
 
-		DB((dbg, LEVEL_1, "Branch predecessor is: %lu\n", meta.last_conditional->node_nr));
-	
-		meta.total_nodes = 0;
-		foreach_irn_out(block, i, succ) {
-			if (!arch_is_irn_not_scheduled(succ) && !arch_irn_is(succ, schedule_first)) {
-				// Scheduelable node
-				meta.total_nodes++;
-				if (ir_nodeset_size(&meta.branch_candidates) >= 3)
-					continue;
-				if (!irn_visited(succ) 
-						&& is_end_node_for_block(succ)
-						&& !modifies_flags(succ)) {
-					// Placeable between cmp and branch
-					ir_nodeset_insert(&meta.branch_candidates, succ);
+			DB((dbg, LEVEL_1, "Branch predecessor is: %lu\n", meta.last_conditional->node_nr));
+		
+			meta.total_nodes = 0;
+			foreach_irn_out(block, i, succ) {
+				if (!arch_is_irn_not_scheduled(succ) && !arch_irn_is(succ, schedule_first)) {
+					// Scheduelable node
+					meta.total_nodes++;
+					if (ir_nodeset_size(&meta.branch_candidates) >= 3)
+						continue;
+					if (!irn_visited(succ) 
+							//&& is_end_node_for_block(succ)
+							&& !modifies_flags(succ)) {
+						// Placeable between cmp and branch
+						ir_nodeset_insert(&meta.branch_candidates, succ);
+					}
 				}
 			}
+			DB((dbg, LEVEL_1, "Branch cands contains %i node(s): ", ir_nodeset_size(&meta.branch_candidates)));
+			DUMP_NODES(&meta.branch_candidates);
+		} else {
+			DB((dbg, LEVEL_2, YEL "non-bicc branch found: %lu\nskipping" RST, 
+				branch->node_nr));
+			meta.last_conditional = NULL;
 		}
-		DB((dbg, LEVEL_1, "Branch cands contains %i node(s): ", ir_nodeset_size(&meta.branch_candidates)));
-		DUMP_NODES(&meta.branch_candidates);
 
 	} else {
 		meta.last_conditional = NULL;
