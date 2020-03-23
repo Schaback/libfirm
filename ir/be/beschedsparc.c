@@ -78,14 +78,7 @@ static char score_load(ir_node* node) {
 	}
 	return 0;
 }
-/*
-static bool score_branch(ir_node* node) {
-	if (node == last_icci)	
-		DB((dbg, LEVEL_1, BLU "\tBranch predecessor found: %ld\n" RST, 
-				node->node_nr));
-	return (node == last_icci) ? 1 : 0;
-}
-*/
+
 inline static bool _is_MulDiv(const ir_node* node) {
 	return is_sparc_SMul(node)  || is_sparc_SMulCCZero(node) 
 		|| is_sparc_SMulh(node) || is_sparc_UMulh(node) 
@@ -139,8 +132,6 @@ static ir_node *sparc_select(ir_nodeset_t *ready_set, block_meta* meta)
 	best_choice.score = -100;
 
 	if (SIZE_CHECK && n == 1) { 
-		// Branches are the only option most of the time (always?)
-		// No schedueling betweeen blocks...
 		DB((dbg, LEVEL_1, "\tOnly one node found\n"));
 	} else {
 		int num_nodes = ir_nodeset_size(&meta->branch_candidates) + 2;
@@ -236,7 +227,7 @@ static void sched_block(ir_node *block, void *data)
 		if (is_sparc_Bicc(branch)) {
 			//DB((dbg, LEVEL_2, YEL "conditional branch found: %lu\n" RST, 
 			//			branch->node_nr));
-			assert(get_irn_arity(branch) == 1); // why should there be multiple?
+			assert(get_irn_arity(branch) == 1);
 			meta.last_conditional = get_irn_in(branch)[0];	
 
 			ir_graph* irg = get_irn_irg(block);
@@ -286,7 +277,6 @@ static void sched_sparc(ir_graph *irg)
 {
 	DB((dbg, LEVEL_1, "Starting SPARC scheduling\n"));
 	DB((dbg, LEVEL_1, "Scheduling graph \"%s\"\n", irg->ent->name));
-	//TODO: is this right? do I need to free_irg_outs?
 	assure_irg_outs(irg);
 	
 	be_list_sched_begin(irg);
